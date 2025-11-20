@@ -1,0 +1,61 @@
+# Configuración del minijuego Coliseo: Élite vs Horda
+
+# Duración de la partida en minutos
+game-duration-minutes: 10
+
+# Configuración de balanceo de equipos
+team-balance:
+  # Porcentaje de jugadores que formarán el equipo Élite
+  percentage: 0.25
+  # Mínimo de jugadores en el equipo Élite
+  min-elite-players: 3
+  # Máximo de jugadores en el equipo Élite
+  max-elite-players: 10
+
+# Configuración de kits asimétricos V2 (Tácticos)
+kits:
+  elite:
+    armor:
+      helmet: "DIAMOND_HELMET:PROTECTION_ENVIRONMENTAL:1"
+      chestplate: "DIAMOND_CHESTPLATE:PROTECTION_ENVIRONMENTAL:1"
+      leggings: "DIAMOND_LEGGINGS:PROTECTION_ENVIRONMENTAL:1"
+      boots: "DIAMOND_BOOTS:PROTECTION_ENVIRONMENTAL:1"
+    items:
+      - "DIAMOND_SWORD:DAMAGE_ALL:1:slot=0"
+      - "SHIELD:slot=40"  # Off-hand
+      - "GOLDEN_APPLE:1:slot=1"
+      - "GOLDEN_CARROT:6:slot=2"
+      - "WATER_BUCKET:1:slot=3"
+      - "COBWEB:4:slot=7"
+      - "CYAN_TERRACOTTA:16:slot=8"
+    effects:
+      - "SLOW:0"  # Lentitud I permanente
+  
+  horde:
+    armor:
+      helmet: "IRON_HELMET"
+      chestplate: "IRON_CHESTPLATE"
+      leggings: "IRON_LEGGINGS"
+      boots: "IRON_BOOTS"
+    items:
+      - "IRON_SWORD:slot=0"
+      - "IRON_AXE:slot=1"
+      - "BOW:slot=2"
+      - "CROSSBOW:PIERCING:1:slot=3"
+      - "ARROW:32:slot=4"
+      - "LAVA_BUCKET:1:slot=5"
+      - "ZOMBIE_SPAWN_EGG:2:slot=6"
+      - "SKELETON_SPAWN_EGG:2:slot=7"
+      - "WHITE_WOOL:32:slot=8"
+      - "COOKED_BEEF:16:slot=35"  # Inventario superior
+
+# Configuración de puntuación V4.1 (Balanceado)
+scoring:
+  # Puntos asignados al final de la partida
+  horde-win-bonus: 60        # Bono para cada miembro de la Horda si ganan
+  elite-win-bonus: 20        # Bono para cada Élite superviviente si ganan
+  elite-loss-penalty: 25     # Penalización para cada Élite si pierden
+  
+  # Puntos asignados instantáneamente al matar
+  horde-kill-elite: 40       # Puntos para Horda por matar un Élite
+  elite-kill-horde: 10       # Puntos para Élite por matar un Horda

@@ -1,0 +1,53 @@
+# Configuración del minijuego "Robar la Cabeza del Creador"
+
+partida:
+  # Duración de la partida en segundos (180 = 3 minutos)
+  duracion-segundos: 180
+  
+  # Proporción de jugadores por cabeza (5.0 = 1 cabeza por cada 5 jugadores)
+  # Ejemplo: 38 jugadores = ceil(38 / 5.0) = 8 cabezas
+  head-ratio: 5.0
+
+# Configuración visual de la cabeza gigante
+visuals:
+  # Factor de escala de la cabeza (1.0 = tamaño normal, 1.5 = 50% más grande)
+  scale: 1.5
+  
+  # Offset vertical desde la altura de los ojos del jugador
+  # Valores negativos bajan la cabeza, positivos la suben
+  y-offset: -0.25
+  
+  # Lista de nombres de jugadores cuyas skins se usarán para las cabezas
+  # Se selecciona uno al azar cada vez que se asigna una cabeza
+  creator-heads:
+    - "Brocoly776"
+    - "citt"
+    - "Notch"
+
+# Configuración de puntuación (Tier Bajo, PME ~71)
+puntuacion:
+  # Puntos por cada intervalo sosteniendo la cabeza
+  puntos-intervalo-hold: 2
+  
+  # Duración del intervalo en ticks (200 ticks = 10 segundos)
+  ticks-intervalo-hold: 200
+  
+  # Puntos de bonificación por robar la cabeza a otro jugador (bono de acción)
+  bono-por-robo: 2
+  
+  # Puntos de bonificación al final de la partida según el ranking de sesión
+  bono-posicion-final:
+    primero: 15
+    segundo: 10
+    tercero: 5
+  
+  # Puntos por participar (todos los reciben al finalizar)
+  participacion: 10
+
+# Kit de pociones con cooldowns
+potion-kit:
+  # Define las habilidades que cada jugador recibirá
+  # Formato: "TIPO_POCION:NIVEL:SLOT_INVENTARIO:COOLDOWN_EN_SEGUNDOS"
+  items:
+    - "SLOW:0:0:15"   # Poción de Lentitud I en el slot 0, reaparece en 15 segundos
+    - "SPEED:0:1:25"  # Poción de Velocidad I en el slot 1, reaparece en 25 segundos

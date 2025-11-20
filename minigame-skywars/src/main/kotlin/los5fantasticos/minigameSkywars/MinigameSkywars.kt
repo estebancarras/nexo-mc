@@ -1,0 +1,215 @@
+package los5fantasticos.minigameSkywars
+
+import los5fantasticos.torneo.TorneoPlugin
+import los5fantasticos.torneo.api.MinigameModule
+import org.bukkit.entity.Player
+import org.bukkit.plugin.Plugin
+import org.bukkit.event.Listener
+import org.bukkit.event.EventHandler
+import com.walrusone.skywarsreloaded.events.SkyWarsWinEvent
+import com.walrusone.skywarsreloaded.events.SkyWarsKillEvent
+import com.walrusone.skywarsreloaded.SkyWarsReloaded
+import los5fantasticos.minigameSkywars.commands.SkywarsCommand
+import org.bukkit.command.CommandExecutor
+
+/**
+ * Manager del minijuego SkyWars.
+ *
+ * Juego de supervivencia en el aire donde los jugadores luchan hasta que solo queda uno.
+ */
+class MinigameSkywars(private val torneoPlugin: TorneoPlugin) : MinigameModule, Listener {
+    
+    private lateinit var plugin: Plugin
+    
+    override val gameName = "SkyWars"
+    override val version = "1.0"
+    override val description = "Minijuego de supervivencia en el aire - ¡el último en pie gana!"
+    
+    private val activePlayers = mutableSetOf<Player>()
+    private var gameRunning = false
+    // Set de guardia para evitar reentradas/recursión al devolver jugadores al lobby
+    private val returningPlayers = mutableSetOf<Player>()
+    
+    override fun onEnable(plugin: Plugin) {
+        this.plugin = plugin
+
+        // Registrar el listener para eventos de SkyWarsReloaded
+        plugin.server.pluginManager.registerEvents(this, plugin)
+
+        plugin.logger.info("✓ $gameName v$version habilitado")
+    }
+
+    override fun getCommandExecutors(): Map<String, CommandExecutor> {
+        val executor = SkywarsCommand(this, torneoPlugin)
+        return mapOf("skywars" to executor)
+    }
+    
+    override fun onDisable() {
+        // Terminar todos los juegos activos
+        endAllGames()
+        
+        plugin.logger.info("✓ $gameName deshabilitado")
+    }
+    
+    override fun isGameRunning(): Boolean {
+        return gameRunning
+    }
+    
+    override fun getActivePlayers(): List<Player> {
+        return activePlayers.toList()
+    }
+    
+    /**
+     * Inicia el minijuego en modo torneo centralizado.
+     * Delega al comando de SkyWars para manejar la lógica específica.
+     */
+    override fun onTournamentStart(players: List<Player>) {
+        plugin.logger.info("[$gameName] ═══ INICIO DE TORNEO ═══")
+        plugin.logger.info("[$gameName] ${players.size} jugadores disponibles")
+        plugin.logger.info("[$gameName] Los jugadores deben unirse a las arenas de SkyWars")
+        
+        // Marcar jugadores como activos
+        players.forEach { player ->
+            activePlayers.add(player)
+        }
+        
+        gameRunning = true
+        plugin.logger.info("[$gameName] ✓ Torneo iniciado - Usa /skywars para gestionar partidas")
+    }
+    
+    /**
+     * Inicia una nueva partida de SkyWars.
+     */
+    @Suppress("unused")
+    fun startGame(players: List<Player>) {
+        if (gameRunning) {
+            plugin.logger.warning("Ya hay una partida de SkyWars en curso")
+            return
+        }
+        
+        gameRunning = true
+        activePlayers.addAll(players)
+        
+        // TODO: Implementar lógica de inicio del juego
+        // - Teleportar jugadores a las islas
+        // - Dar items iniciales
+        // - Iniciar countdown
+        
+        players.forEach { player ->
+            player.sendMessage("§6[SkyWars] §e¡La partida ha comenzado! §7Último en pie gana.")
+            recordGamePlayed(player)
+        }
+        
+        plugin.logger.info("Partida de SkyWars iniciada con ${players.size} jugadores")
+    }
+    
+    /**
+     * Termina la partida actual.
+     */
+    fun endGame(winner: Player? = null) {
+        if (!gameRunning) return
+        
+        gameRunning = false
+        
+        if (winner != null) {
+            // El ganador recibe puntos
+            torneoPlugin.torneoManager.addScore(winner.uniqueId, gameName, 100, "Victoria en SkyWars")
+            recordVictory(winner)
+            
+            // Notificar a todos los jugadores
+            activePlayers.forEach { player ->
+                if (player == winner) {
+                    player.sendMessage("§6[SkyWars] §a¡Felicidades! Has ganado la partida.")
+                } else {
+                    player.sendMessage("§6[SkyWars] §c${winner.name} ha ganado la partida.")
+                }
+            }
+        }
+        
+        // Limpiar jugadores activos
+        activePlayers.clear()
+        
+        plugin.logger.info("Partida de SkyWars terminada${if (winner != null) " - Ganador: ${winner.name}" else ""}")
+    }
+    
+    /**
+     * Termina todos los juegos activos.
+     */
+    override fun endAllGames() {
+        if (gameRunning) {
+            endGame()
+        }
+    }
+    
+    /**
+     * Registra una victoria en el torneo.
+     */
+    private fun recordVictory(player: Player) {
+        torneoPlugin.torneoManager.recordGameWon(player, gameName)
+    }
+    
+    /**
+     * Registra una partida jugada.
+     */
+    private fun recordGamePlayed(player: Player) {
+        torneoPlugin.torneoManager.recordGamePlayed(player, gameName)
+    }
+
+    /**
+     * Listener para el evento de victoria en SkyWarsReloaded.
+     * Asigna puntos automáticamente al ganador.
+     * Se ejecuta varias veces cuando hay varios ganadores (en caso de equipos).
+     */
+    @EventHandler
+    fun onSkyWarsWin(event: SkyWarsWinEvent) {
+        val winner = event.player // Implicitamente getPlayer()
+        if (winner != null) {
+            // Asignar 100 puntos por victoria
+            torneoPlugin.torneoManager.addScore(winner.uniqueId, gameName, 100, "Victoria en SkyWars")
+            // Registrar la victoria en estadísticas
+            torneoPlugin.torneoManager.recordGameWon(winner, gameName)
+
+            plugin.logger.info("Puntos asignados automáticamente a ${winner.name} por victoria en SkyWars")
+        }
+    }
+
+    /**
+     * Listener para el evento de asesinato en SkyWarsReloaded.
+     * Asigna 10 puntos al asesino.
+     */
+    @EventHandler
+    fun onSkyWarsKill(event: SkyWarsKillEvent) {
+        val killer = event.killer // Implicitamente getKiller()
+        val killed = event.killed // Implicitamente getKilled()
+        if (killer != null && killed != null) {
+            // Asignar 10 puntos por asesinato
+            torneoPlugin.torneoManager.addScore(killer.uniqueId, gameName, 40, "Asesinato en SkyWars")
+
+            plugin.logger.info("40 puntos asignados a ${killer.name} por asesinato de ${killed.name} en SkyWars")
+        }
+    }
+
+    /**
+     * Verifica si un jugador está actualmente en un mapa de SkyWars.
+     * Esto incluye cualquier estado: waiting lobby, waiting start, playing, ending, etc.
+     * 
+     * @param player El jugador a verificar
+     * @return true si el jugador está en algún mapa de SkyWars, false en caso contrario
+     */
+    fun isPlayerInSkyWarsMap(player: Player): Boolean {
+        try {
+            // Iterar sobre todos los mapas de SkyWars
+            val maps = SkyWarsReloaded.getGameMapMgr().mapsCopy
+            for (gameMap in maps) {
+                // Verificar si el jugador está en este mapa
+                if (gameMap.allPlayers.contains(player)) {
+                    return true
+                }
+            }
+            return false
+        } catch (e: Exception) {
+            plugin.logger.warning("Error al verificar si ${player.name} está en SkyWars: ${e.message}")
+            return false
+        }
+    }
+}

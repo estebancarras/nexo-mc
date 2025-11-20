@@ -1,0 +1,122 @@
+# ════════════════════════════════════════════════════════════
+# Configuración del Minijuego Memorias - Sistema de Bloques
+# ════════════════════════════════════════════════════════════
+
+# ═══ CONFIGURACIÓN DEL JUEGO ═══
+game-settings:
+  # Tiempo en segundos que tienen los jugadores para memorizar las posiciones (por defecto: 10s)
+  memorization-time-seconds: 15
+
+  # Tiempo total en segundos que tiene cada jugador para completar el juego (por defecto: 300s = 5min)
+  # Duración máxima total de la partida: 10 minutos (5 min por jugador)
+  player-time-seconds: 300
+
+  # Si es true, el turno cambia al oponente cuando un jugador falla en encontrar un par
+  turn-change-on-fail: true
+
+  # Tamaño del tablero (gridSize x gridSize)
+  # Ejemplo: 10 = tablero 10x10 con 100 casillas (50 pares)
+  # Debe ser par para tener número exacto de pares
+  grid-size: 10
+
+  # Tiempo en segundos que permanecen visibles los bloques después de fallar (por defecto: 2s)
+  reveal-time-seconds: 2
+
+# ═══ MAZO DE BLOQUES ═══
+# Lista de materiales sólidos que se usarán como "cartas" en el juego
+# IMPORTANTE: Deben ser nombres válidos de Material y bloques sólidos
+# Referencia: https://hub.spigotmc.org/javadocs/spigot/org/bukkit/Material.html
+block-set:
+  - "DIAMOND_BLOCK"
+  - "EMERALD_BLOCK"
+  - "GOLD_BLOCK"
+  - "IRON_BLOCK"
+  - "COAL_BLOCK"
+  - "LAPIS_BLOCK"
+  - "REDSTONE_BLOCK"
+  - "QUARTZ_BLOCK"
+  - "AMETHYST_BLOCK"
+  - "COPPER_BLOCK"
+  - "NETHERITE_BLOCK"
+  - "ANCIENT_DEBRIS"
+  - "CRYING_OBSIDIAN"
+  - "GLOWSTONE"
+  - "SEA_LANTERN"
+  - "PRISMARINE"
+  - "DARK_PRISMARINE"
+  - "PRISMARINE_BRICKS"
+  - "END_STONE"
+  - "END_STONE_BRICKS"
+  - "PURPUR_BLOCK"
+  - "PURPUR_PILLAR"
+  - "OBSIDIAN"
+  - "MAGMA_BLOCK"
+  - "NETHER_BRICKS"
+  - "RED_NETHER_BRICKS"
+  - "WARPED_PLANKS"
+  - "CRIMSON_PLANKS"
+  - "WARPED_NYLIUM"
+  - "CRIMSON_NYLIUM"
+  - "BASALT"
+  - "POLISHED_BASALT"
+  - "SMOOTH_BASALT"
+  - "BLACKSTONE"
+  - "GILDED_BLACKSTONE"
+  - "POLISHED_BLACKSTONE"
+  - "CHISELED_POLISHED_BLACKSTONE"
+  - "SPONGE"
+  - "WET_SPONGE"
+  - "SLIME_BLOCK"
+  - "HONEY_BLOCK"
+  - "MELON"
+  - "HAY_BLOCK"
+  - "BLUE_ICE"
+  - "VERDANT_FROGLIGHT"
+  - "CALCITE"
+  - "TARGET"
+  - "BONE_BLOCK"
+  - "DRIED_KELP_BLOCK"
+  - "MOSS_BLOCK"
+  - "TERRACOTTA"
+  - "WHITE_TERRACOTTA"
+  - "ORANGE_TERRACOTTA"
+  - "MAGENTA_TERRACOTTA"
+  - "LIGHT_BLUE_TERRACOTTA"
+  - "YELLOW_TERRACOTTA"
+  - "LIME_TERRACOTTA"
+  - "PINK_TERRACOTTA"
+  - "GRAY_TERRACOTTA"
+  - "LIGHT_GRAY_TERRACOTTA"
+  - "CYAN_TERRACOTTA"
+  - "PURPLE_TERRACOTTA"
+  - "BLUE_TERRACOTTA"
+  - "BROWN_TERRACOTTA"
+  - "GREEN_TERRACOTTA"
+  - "RED_TERRACOTTA"
+  - "BLACK_TERRACOTTA"
+
+# ═══ SISTEMA DE PUNTUACIÓN DINÁMICA ═══
+# Sistema completo con bonus de rendimiento
+puntuacion:
+  # ─── Puntos Durante el Duelo ───
+  # Puntos por cada par encontrado
+  por-par-encontrado: 2
+  
+  # Bonus por mantener racha de aciertos (2+ aciertos consecutivos)
+  bonus-por-racha: 2
+  
+  # Bonus especial para el primer jugador que encuentre un par
+  bonus-primer-acierto: 5
+  
+  # ─── Puntos al Finalizar el Duelo ───
+  # Puntos para el ganador del duelo
+  por-victoria: 20
+  
+  # Puntos para el perdedor (por participación)
+  por-participacion: 5
+  
+  # Puntos para cada jugador en caso de empate por timeout (ambos tienen los mismos pares)
+  por-empate-timeout: 3
+  
+  # Bonus de remontada (si el ganador estaba 3+ puntos atrás)
+  bonus-remontada: 10

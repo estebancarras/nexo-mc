@@ -1,0 +1,709 @@
+package yo.spray.robarCabeza.services
+
+import los5fantasticos.torneo.TorneoPlugin
+import los5fantasticos.torneo.util.GameTimer
+import net.kyori.adventure.text.Component
+import net.kyori.adventure.text.format.NamedTextColor
+import net.md_5.bungee.api.ChatMessageType
+import net.md_5.bungee.api.chat.TextComponent
+import org.bukkit.*
+import org.bukkit.entity.ArmorStand
+import org.bukkit.entity.Display.Billboard
+import org.bukkit.entity.ItemDisplay
+import org.bukkit.entity.Player
+import org.bukkit.inventory.ItemStack
+import org.bukkit.plugin.Plugin
+import org.bukkit.potion.PotionEffect
+import org.bukkit.potion.PotionEffectType
+import org.bukkit.scheduler.BukkitRunnable
+import org.bukkit.util.Transformation
+import org.joml.Quaternionf
+import org.joml.Vector3f
+import yo.spray.robarCabeza.game.Arena
+import yo.spray.robarCabeza.game.GameState
+import yo.spray.robarCabeza.game.RobarCabezaGame
+import java.util.UUID
+import kotlin.math.cos
+import kotlin.math.sin
+
+/**
+ * Gestor central de la lógica del juego RobarCabeza.
+ * 
+ * Responsabilidades:
+ * - Gestionar el ciclo de vida de las partidas
+ * - Controlar el estado del juego
+ * - Manejar la lógica de cabezas (dar, robar, remover)
+ * - Gestionar temporizadores y countdowns
+ * - Coordinar con el ScoreService para puntuación
+ * - Coordinar con el VisualService para efectos visuales
+ * - Gestionar arenas de juego
+ */
+class GameManager(
+    val plugin: Plugin,
+    private val torneoPlugin: TorneoPlugin,
+    scoreService: ScoreService,
+    private val visualService: VisualService,
+    private val arenaManager: ArenaManager,
+    val itemKitService: ItemKitService,
+    private val robarCabezaManager: yo.spray.robarCabeza.RobarCabezaManager
+) {
+    
+    private val scoreService: ScoreService = scoreService
+    
+    /**
+     * Partida activa actual.
+     */
+    private var activeGame: RobarCabezaGame? = null
+    
+    /**
+     * Arena activa de la partida actual.
+     */
+    private var activeArena: Arena? = null
+    
+    /**
+     * Configuración del juego.
+     */
+    private val tailCooldownSeconds = 3
+    private val gameTimeSeconds = 120
+    
+    /**
+     * Ubicaciones del juego (legacy - para compatibilidad).
+     */
+    var gameSpawn: Location? = null
+    var lobbySpawn: Location? = null
+    
+    /**
+     * Obtiene la partida activa.
+     */
+    fun getActiveGame(): RobarCabezaGame? = activeGame
+    
+    /**
+     * Verifica si hay una partida en curso.
+     */
+    fun isGameRunning(): Boolean = activeGame?.state == GameState.IN_GAME
+    
+    /**
+     * Obtiene la lista de jugadores activos.
+     */
+    fun getActivePlayers(): List<Player> {
+        return activeGame?.players?.mapNotNull { Bukkit.getPlayer(it) } ?: emptyList()
+    }
+    
+    /**
+     * Verifica si un jugador está en una partida.
+     */
+    fun isPlayerInGame(player: Player): Boolean {
+        return activeGame?.players?.contains(player.uniqueId) == true
+    }
+    
+    /**
+     * Obtiene la arena activa.
+     */
+    fun getActiveArena(): Arena? = activeArena
+    
+    /**
+     * Añade un jugador al juego.
+     */
+    fun addPlayer(player: Player): Boolean {
+        val game = activeGame
+        
+        // Si hay una partida en curso, no permitir unirse
+        if (game != null && game.state != GameState.LOBBY) {
+            player.sendMessage("${ChatColor.RED}¡El juego ya está en progreso!")
+            return false
+        }
+        
+        // Crear nueva partida si no existe
+        val currentGame = game ?: createNewGame()
+        
+        // Añadir jugador
+        currentGame.players.add(player.uniqueId)
+        
+        // Solo teletransportar si hay un gameSpawn configurado (modo manual)
+        // En modo torneo, el TournamentFlowManager ya teletransportó a los jugadores
+        if (gameSpawn != null) {
+            player.teleport(gameSpawn!!)
+            player.addPotionEffect(PotionEffect(PotionEffectType.SPEED, 20 * 10, 0))
+        }
+        
+        broadcastToGame("${ChatColor.AQUA}${player.name} se unió al juego! (${currentGame.getTotalPlayers()})")
+        
+        // Iniciar juego si hay suficientes jugadores (solo en modo manual)
+        if (currentGame.hasMinimumPlayers() && currentGame.state == GameState.LOBBY && gameSpawn != null) {
+            Bukkit.getScheduler().runTaskLater(plugin, Runnable { startGame() }, 100L)
+        }
+        
+        return true
+    }
+    
+    /**
+     * Crea una nueva partida.
+     */
+    private fun createNewGame(): RobarCabezaGame {
+        val game = RobarCabezaGame()
+        activeGame = game
+        return game
+    }
+    
+    /**
+     * Inicia la partida con una arena específica.
+     */
+    fun startGame(arena: Arena? = null) {
+        val game = activeGame ?: return
+        
+        if (game.players.isEmpty() || game.state != GameState.LOBBY) {
+            return
+        }
+        
+        // Seleccionar arena (usar la proporcionada o una aleatoria)
+        val selectedArena = arena ?: arenaManager.getRandomArena()
+        
+        if (selectedArena == null) {
+            broadcastToGame("${ChatColor.RED}¡No hay arenas configuradas! Contacta a un administrador.")
+            return
+        }
+        
+        // Verificar que la arena tenga spawns configurados
+        if (selectedArena.spawns.isEmpty()) {
+            broadcastToGame("${ChatColor.RED}¡La arena no tiene spawns configurados!")
+            return
+        }
+        
+        activeArena = selectedArena
+        game.state = GameState.COUNTDOWN
+        
+        // Reiniciar puntos de sesión
+        scoreService.resetSessionScores()
+        
+        // Teletransportar jugadores a spawns aleatorios de la arena
+        val playersList = game.players.mapNotNull { Bukkit.getPlayer(it) }
+        playersList.forEach { player ->
+            val randomSpawn = selectedArena.spawns.random()
+            player.teleport(randomSpawn)
+        }
+        
+        preStartCountdown {
+            game.state = GameState.IN_GAME
+            
+            // Configurar jugadores
+            playersList.forEach { player ->
+                // Forzar modo aventura
+                player.gameMode = GameMode.ADVENTURE
+                
+                // Limpiar inventario
+                player.inventory.clear()
+                
+                // Restaurar salud y hambre
+                player.health = 20.0
+                player.foodLevel = 20
+                
+                // Mostrar scoreboard dedicado
+                robarCabezaManager.robarCabezaScoreboardService.showScoreboard(player, game)
+                
+                // Dar kit de pociones
+                itemKitService.giveFullKit(player)
+            }
+            
+            // Calcular número de cabezas dinámicamente según ratio configurado
+            val headRatio = plugin.config.getDouble("partida.head-ratio", 5.0)
+            val headCount = kotlin.math.ceil(playersList.size / headRatio).toInt().coerceAtLeast(1)
+            
+            // Seleccionar jugadores aleatorios para recibir cabezas
+            val shuffledPlayers = playersList.shuffled()
+            val initialCarriers = shuffledPlayers.take(headCount)
+            
+            // Asignar cabezas a los portadores iniciales
+            initialCarriers.forEach { player ->
+                game.setCarrier(player.uniqueId)
+                giveHead(player)
+                player.sendMessage(Component.text("¡Comienzas con la cabeza!", NamedTextColor.GREEN))
+            }
+            
+            game.countdown = gameTimeSeconds
+            broadcastToGame("${ChatColor.YELLOW}¡Comienza el juego! ${ChatColor.GOLD}$headCount jugadores tienen cabeza!")
+            broadcastToGame("${ChatColor.GRAY}Arena: ${ChatColor.WHITE}${selectedArena.name}")
+            startCountdown()
+            startPointsTicker()
+        }
+    }
+    
+    /**
+     * Cuenta atrás pre-inicio (3, 2, 1, ¡Vamos!).
+     */
+    private fun preStartCountdown(onFinish: () -> Unit) {
+        val game = activeGame ?: return
+        val steps = arrayOf("3", "2", "1", "¡Vamos!")
+        
+        object : BukkitRunnable() {
+            var i = 0
+            override fun run() {
+                if (i >= steps.size) {
+                    cancel()
+                    onFinish()
+                    return
+                }
+                game.players.forEach { id ->
+                    Bukkit.getPlayer(id)?.sendTitle("${ChatColor.GOLD}${steps[i]}", "", 0, 20, 0)
+                }
+                i++
+            }
+        }.runTaskTimer(plugin, 0L, 20L)
+    }
+    
+    /**
+     * Inicia el temporizador del juego.
+     */
+    private fun startCountdown() {
+        val game = activeGame ?: return
+        
+        // Crear temporizador visual con BossBar
+        val timer = GameTimer(
+            plugin = torneoPlugin,
+            durationInSeconds = gameTimeSeconds,
+            title = "§c§l Robar Cabeza",
+            onFinish = {
+                // Cuando el tiempo se agota, finalizar el juego
+                endGame()
+            },
+            onTick = { secondsLeft ->
+                // Actualizar display del juego
+                updateGameDisplay()
+                
+                // Reproducir sonido en los últimos 10 segundos
+                if (secondsLeft <= 10 && secondsLeft > 0) {
+                    game.players.forEach { uuid ->
+                        Bukkit.getPlayer(uuid)?.playSound(
+                            Bukkit.getPlayer(uuid)!!.location,
+                            Sound.BLOCK_NOTE_BLOCK_PLING,
+                            1.0f,
+                            2.0f
+                        )
+                    }
+                }
+            }
+        )
+        
+        // Añadir todos los jugadores al temporizador
+        game.players.forEach { uuid ->
+            Bukkit.getPlayer(uuid)?.let { player ->
+                timer.addPlayer(player)
+            }
+        }
+        
+        // Guardar referencia y iniciar
+        game.gameTimer = timer
+        timer.start()
+    }
+    
+    /**
+     * Finaliza la partida.
+     */
+    fun endGame() {
+        val game = activeGame ?: return
+        
+        game.state = GameState.FINISHED
+        
+        // Detener temporizador visual (BossBar) y ticker de puntos
+        game.gameTimer?.stop()
+        game.gameTimer = null
+        game.pointsTickerTask?.cancel()
+        game.pointsTickerTask = null
+        
+        // Obtener ranking final
+        val ranking = scoreService.getSessionRanking()
+        
+        // Anunciar ganadores
+        broadcastToGame("${ChatColor.GOLD}${ChatColor.BOLD}========== FINAL DEL JUEGO ==========")
+        
+        if (ranking.isNotEmpty()) {
+            val top3 = ranking.take(3)
+            top3.forEachIndexed { index, (playerId, points) ->
+                val player = Bukkit.getPlayer(playerId)
+                val position = index + 1
+                val medal = when (position) {
+                    1 -> "🥇"
+                    2 -> "🥈"
+                    3 -> "🥉"
+                    else -> ""
+                }
+                
+                if (player != null) {
+                    broadcastToGame("${ChatColor.YELLOW}$medal #$position: ${ChatColor.WHITE}${player.name} ${ChatColor.GRAY}($points puntos)")
+                    
+                    // Otorgar bonus por posición
+                    scoreService.awardPointsForFinalPosition(player, position)
+                    
+                    // Efectos visuales para ganadores
+                    when (position) {
+                        1 -> celebrateWinner(player, "¡CAMPEÓN!")
+                        2 -> celebrateWinner(player, "¡2do Lugar!")
+                        3 -> celebrateWinner(player, "¡3er Lugar!")
+                    }
+                }
+            }
+        }
+        
+        broadcastToGame("${ChatColor.GOLD}${ChatColor.BOLD}====================================")
+        
+        // Otorgar puntos de participación a todos
+        game.players.mapNotNull { Bukkit.getPlayer(it) }.forEach { player ->
+            scoreService.awardPointsForParticipation(player)
+        }
+        
+        // Teleportar jugadores de vuelta al lobby después de un delay
+        Bukkit.getScheduler().runTaskLater(plugin, Runnable {
+            game.players.mapNotNull { Bukkit.getPlayer(it) }.forEach { player ->
+                // Ocultar scoreboard dedicado y restaurar scoreboard global
+                robarCabezaManager.robarCabezaScoreboardService.hideScoreboard(player)
+                
+                player.gameMode = GameMode.SURVIVAL
+                player.removePotionEffect(PotionEffectType.GLOWING)
+                
+                // Limpiar cooldowns del kit
+                itemKitService.clearCooldowns(player)
+                
+                // Limpiar inventario completamente
+                player.inventory.clear()
+                player.inventory.helmet = null
+                player.inventory.chestplate = null
+                player.inventory.leggings = null
+                player.inventory.boots = null
+                
+                teleportToLobby(player)
+            }
+            resetGame()
+        }, 100L)
+    }
+    
+    /**
+     * Resetea el estado del juego.
+     */
+    private fun resetGame() {
+        val game = activeGame ?: return
+        
+        // Limpiar todas las cabezas
+        cleanupAllTails()
+        
+        // Limpiar la partida y arena
+        activeGame = null
+        activeArena = null
+    }
+    
+    /**
+     * Da la cabeza a un jugador.
+     */
+    fun giveHead(player: Player) {
+        val game = activeGame ?: return
+        
+        // Añadir cabeza al jugador (no limpiar las demás, ahora hay múltiples cabezas)
+        game.playersWithTail.add(player.uniqueId)
+        
+        // Equipar cabeza en el slot del casco
+        visualService.equipHead(player)
+        
+        // Aplicar efecto de GLOW
+        player.addPotionEffect(PotionEffect(PotionEffectType.GLOWING, Int.MAX_VALUE, 0, false, false))
+        
+        // Sonido de nota cuando se obtiene la cabeza
+        player.world.playSound(player.location, Sound.BLOCK_NOTE_BLOCK_PLING, 1f, 1.5f)
+        
+        player.sendMessage("${ChatColor.GREEN}¡Ahora tienes la cabeza del creador! ${ChatColor.YELLOW}Ganas 2 puntos cada 10 segundos")
+    }
+    
+    /**
+     * Roba la cabeza de un jugador a otro.
+     */
+    fun stealHead(victim: Player, attacker: Player) {
+        plugin.logger.info("[RobarCabeza] stealHead llamado: ${attacker.name} -> ${victim.name}")
+        
+        val game = activeGame
+        if (game == null) {
+            plugin.logger.warning("[RobarCabeza] No hay juego activo")
+            return
+        }
+        
+        // Verificar cooldown de robo
+        val cooldownRemaining = tailCooldownSeconds * 1000 - (System.currentTimeMillis() - (game.stealCooldowns[attacker.uniqueId] ?: 0))
+        if (cooldownRemaining > 0) {
+            plugin.logger.info("[RobarCabeza] ${attacker.name} en cooldown: ${cooldownRemaining}ms restantes")
+            attacker.sendMessage("${ChatColor.RED}¡Espera antes de robar otra cabeza!")
+            return
+        }
+        
+        // Verificar que la víctima tenga cabeza
+        if (!game.playersWithTail.contains(victim.uniqueId)) {
+            plugin.logger.info("[RobarCabeza] ${victim.name} NO tiene cabeza")
+            return
+        }
+        
+        // Verificar invulnerabilidad de la víctima (5 segundos hardcodeado)
+        val invulnerabilityCooldown = 5
+        if (game.isInvulnerable(victim.uniqueId, invulnerabilityCooldown)) {
+            plugin.logger.info("[RobarCabeza] ${victim.name} es invulnerable")
+            attacker.sendMessage("${ChatColor.YELLOW}¡${victim.name} es invulnerable!")
+            return
+        }
+        
+        plugin.logger.info("[RobarCabeza] ✓ Todas las verificaciones pasadas, ejecutando robo...")
+        
+        // Actualizar cooldowns
+        game.stealCooldowns[attacker.uniqueId] = System.currentTimeMillis()
+        game.invulnerabilityCooldowns[attacker.uniqueId] = System.currentTimeMillis()
+        
+        // Remover cabeza de la víctima
+        removeHead(victim)
+        plugin.logger.info("[RobarCabeza] Cabeza removida de ${victim.name}")
+        
+        // Dar cabeza al atacante
+        giveHead(attacker)
+        plugin.logger.info("[RobarCabeza] Cabeza dada a ${attacker.name}")
+        
+        // Otorgar puntos por robo
+        scoreService.awardPointsForSteal(attacker)
+        
+        val stealPoints = plugin.config.getInt("puntuacion.bono-por-robo", 2)
+        attacker.sendMessage("${ChatColor.GREEN}¡Le robaste la cabeza a ${victim.name}! ${ChatColor.GOLD}+${stealPoints} puntos")
+        victim.sendMessage("${ChatColor.RED}¡${attacker.name} te robó la cabeza!")
+        
+        plugin.logger.info("[RobarCabeza] ✓ Robo completado exitosamente")
+    }
+    
+    /**
+     * Remueve la cabeza de un jugador.
+     */
+    private fun removeHead(player: Player) {
+        val game = activeGame ?: return
+        
+        game.playersWithTail.remove(player.uniqueId)
+        
+        // Remover cabeza del slot del casco
+        visualService.removeHead(player)
+        
+        // Limpiar el inventario del jugador (remover la cabeza física)
+        player.inventory.helmet = null
+        
+        // Limpiar referencias antiguas (por compatibilidad)
+        game.playerTailDisplays.remove(player.uniqueId)?.remove()
+        game.playerTails.remove(player.uniqueId)?.remove()
+        
+        // Remover efecto de GLOW
+        player.removePotionEffect(PotionEffectType.GLOWING)
+    }
+    
+    /**
+     * Limpia todas las colas del juego.
+     */
+    private fun cleanupAllTails() {
+        val game = activeGame ?: return
+        
+        // Remover cabezas de todos los jugadores
+        game.playersWithTail.toList().forEach { playerId ->
+            Bukkit.getPlayer(playerId)?.let { player ->
+                player.inventory.helmet = null
+                player.removePotionEffect(PotionEffectType.GLOWING)
+            }
+        }
+        
+        game.playerTailDisplays.values.forEach { it.remove() }
+        game.playerTails.values.forEach { it.remove() }
+        game.playerTailDisplays.clear()
+        game.playerTails.clear()
+        game.playersWithTail.clear()
+    }
+    
+    /**
+     * Crea la visualización de cola para un jugador.
+     */
+    private fun createTailDisplay(player: Player) {
+        val game = activeGame ?: return
+        
+        try {
+            val display = player.world.spawn(player.location, ItemDisplay::class.java)
+            display.itemStack = ItemStack(Material.PLAYER_HEAD)
+            display.billboard = Billboard.FIXED
+            game.playerTailDisplays[player.uniqueId] = display
+            
+            object : BukkitRunnable() {
+                override fun run() {
+                    if (!game.playersWithTail.contains(player.uniqueId) || !player.isOnline) {
+                        display.remove()
+                        cancel()
+                        return
+                    }
+                    val base = player.location
+                    val yawRad = Math.toRadians((base.yaw + 180).toDouble())
+                    val loc = base.clone().add(-0.3 * sin(yawRad), 2.5, 0.3 * cos(yawRad))
+                    val rotation = Quaternionf().rotateY(yawRad.toFloat())
+                    display.transformation = Transformation(
+                        Vector3f(loc.x.toFloat(), loc.y.toFloat(), loc.z.toFloat()),
+                        rotation,
+                        Vector3f(0.5f, 0.5f, 0.5f),
+                        Quaternionf()
+                    )
+                }
+            }.runTaskTimer(plugin, 0L, 1L)
+        } catch (_: Throwable) {
+            plugin.logger.warning("ItemDisplay no soportado, usando ArmorStand.")
+            val stand = player.world.spawn(player.location, ArmorStand::class.java)
+            stand.isVisible = false
+            stand.equipment?.helmet = ItemStack(Material.PLAYER_HEAD)
+            game.playerTails[player.uniqueId] = stand
+        }
+    }
+    
+    /**
+     * Inicia el ticker que otorga 2 puntos cada 10 segundos a los jugadores con cabeza.
+     */
+    private fun startPointsTicker() {
+        val game = activeGame ?: return
+        
+        // Cancelar ticker anterior si existe
+        game.pointsTickerTask?.cancel()
+        
+        // Leer intervalo desde configuración (default: 200 ticks = 10 segundos)
+        val tickInterval = plugin.config.getLong("puntuacion.ticks-intervalo-hold", 200L)
+        
+        // Crear nuevo ticker que se ejecuta según el intervalo configurado
+        game.pointsTickerTask = object : BukkitRunnable() {
+            override fun run() {
+                // Verificar que el juego siga activo
+                if (game.state != GameState.IN_GAME) {
+                    cancel()
+                    return
+                }
+                
+                // Otorgar puntos a cada jugador con cabeza según intervalo
+                game.playersWithTail.forEach { playerId ->
+                    Bukkit.getPlayer(playerId)?.let { player ->
+                        // Usar ScoreService para otorgar puntos (lee desde config)
+                        scoreService.awardPointsForIntervalHolding(player)
+                        
+                        // Mostrar partículas alrededor del jugador
+                        player.world.spawnParticle(
+                            Particle.VILLAGER_HAPPY,
+                            player.location.add(0.0, 2.0, 0.0),
+                            5,
+                            0.5,
+                            0.5,
+                            0.5,
+                            0.0
+                        )
+                        
+                        // Sonido de confirmación
+                        player.playSound(player.location, Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 0.5f, 1.5f)
+                    }
+                }
+            }
+        }.runTaskTimer(plugin, tickInterval, tickInterval) // Intervalo configurable desde yml
+    }
+    
+    /**
+     * Remueve un jugador del juego.
+     */
+    fun removePlayer(player: Player) {
+        val game = activeGame ?: return
+        
+        game.players.remove(player.uniqueId)
+        removeHead(player)
+        
+        // Limpiar cooldowns del kit
+        itemKitService.clearCooldowns(player)
+        
+        // Si quedan menos de 2 jugadores, finalizar el juego
+        if (game.state == GameState.IN_GAME && game.players.size < 2) {
+            endGame()
+        }
+    }
+    
+    /**
+     * Efectos visuales para jugador sin cola al final.
+     */
+    private fun explodePlayer(player: Player) {
+        val loc = player.location
+        player.world.spawnParticle(Particle.SMOKE_LARGE, loc, 10, 0.5, 0.5, 0.5, 0.05)
+        player.world.playSound(loc, Sound.ENTITY_VILLAGER_NO, 1f, 0.8f)
+    }
+    
+    /**
+     * Efectos visuales para jugador ganador.
+     */
+    private fun celebrateWinner(player: Player, title: String = "¡VICTORIA!") {
+        player.world.playSound(player.location, Sound.ENTITY_PLAYER_LEVELUP, 1f, 1.2f)
+        player.world.spawnParticle(Particle.FIREWORKS_SPARK, player.location.add(0.0, 1.0, 0.0), 50, 0.5, 0.5, 0.5, 0.1)
+        player.sendTitle("${ChatColor.GOLD}$title", "${ChatColor.YELLOW}¡Felicidades!", 10, 60, 10)
+    }
+    
+    /**
+     * Actualiza el display del juego (action bar).
+     */
+    private fun updateGameDisplay() {
+        val game = activeGame ?: return
+        
+        game.players.forEach { uuid ->
+            val player = Bukkit.getPlayer(uuid)
+            if (player != null) {
+                val sessionScore = scoreService.getSessionScore(uuid)
+                val msg = if (game.playersWithTail.contains(uuid))
+                    "${ChatColor.GREEN}¡Tienes cabeza! ${ChatColor.GOLD}+2 cada 10s"
+                else "${ChatColor.RED}Sin cabeza"
+                player.spigot().sendMessage(
+                    ChatMessageType.ACTION_BAR,
+                    TextComponent("${ChatColor.GOLD}Puntos: ${ChatColor.WHITE}$sessionScore ${ChatColor.GRAY}| $msg")
+                )
+            }
+        }
+    }
+    
+    /**
+     * Teletransporta un jugador al lobby.
+     */
+    fun teleportToLobby(player: Player) {
+        // Usar el lobby global del torneo a través de TournamentFlowManager
+        try {
+            los5fantasticos.torneo.services.TournamentFlowManager.returnToLobby(player)
+            player.sendMessage("${ChatColor.GREEN}¡Regresaste al lobby!")
+        } catch (e: Exception) {
+            // Fallback: usar lobbySpawn local o spawn del mundo
+            val spawn = lobbySpawn ?: player.world.spawnLocation
+            player.teleport(spawn)
+            player.sendMessage("${ChatColor.GREEN}¡Regresaste al lobby!")
+        }
+    }
+    
+    /**
+     * Envía un mensaje a todos los jugadores del juego.
+     */
+    private fun broadcastToGame(msg: String) {
+        val game = activeGame ?: return
+        game.players.forEach { Bukkit.getPlayer(it)?.sendMessage(msg) }
+    }
+    
+    /**
+     * Encuentra el dueño de un ArmorStand de cola.
+     */
+    fun findTailOwner(armorStand: ArmorStand): Player? {
+        val game = activeGame ?: return null
+        return game.playerTails.entries.firstOrNull { it.value == armorStand }?.key?.let { Bukkit.getPlayer(it) }
+    }
+    
+    /**
+     * Limpia todos los recursos del juego.
+     */
+    fun clearAll() {
+        activeGame?.let { game ->
+            game.gameTimer?.stop()
+            game.pointsTickerTask?.cancel()
+            cleanupAllTails()
+            
+            // Limpiar efectos e inventarios de los jugadores
+            game.players.mapNotNull { Bukkit.getPlayer(it) }.forEach { player ->
+                player.removePotionEffect(PotionEffectType.GLOWING)
+                player.inventory.helmet = null
+            }
+        }
+        activeGame = null
+        activeArena = null
+        scoreService.resetSessionScores()
+    }
+}
+

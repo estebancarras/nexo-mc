@@ -1,0 +1,502 @@
+package los5fantasticos.minigameColiseo.services
+
+import los5fantasticos.minigameColiseo.game.ColiseoGame
+import los5fantasticos.minigameColiseo.game.GameState
+import los5fantasticos.minigameColiseo.game.TeamType
+import los5fantasticos.torneo.TorneoPlugin
+import los5fantasticos.torneo.util.GameTimer
+import net.kyori.adventure.text.Component
+import net.kyori.adventure.text.format.NamedTextColor
+import org.bukkit.Bukkit
+import org.bukkit.ChatColor
+import org.bukkit.GameMode
+import org.bukkit.Difficulty
+import org.bukkit.Material
+import org.bukkit.entity.Player
+import org.bukkit.plugin.Plugin
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
+
+/**
+ * Gestor central del juego Coliseo.
+ * 
+ * Responsabilidades:
+ * - Gestionar el ciclo de vida de las partidas
+ * - Balancear equipos dinámicamente
+ * - Controlar condiciones de victoria
+ * - Coordinar con otros servicios
+ */
+class GameManager(
+    private val plugin: Plugin,
+    private val torneoPlugin: TorneoPlugin,
+    private val teamManager: TeamManager,
+    private val kitService: KitService,
+    private val arenaManager: ArenaManager,
+    private val scoreService: ScoreService,
+    private val gameDurationMinutes: Int
+) {
+    
+    // Referencia al servicio de scoreboard (se inyecta después de la creación)
+    private var coliseoScoreboardService: ColiseoScoreboardService? = null
+    
+    /**
+     * Inyecta el servicio de scoreboard.
+     * Necesario porque hay dependencia circular.
+     */
+    fun setScoreboardService(service: ColiseoScoreboardService) {
+        this.coliseoScoreboardService = service
+    }
+    
+    private var activeGame: ColiseoGame? = null
+    
+    /**
+     * Obtiene la partida activa.
+     */
+    fun getActiveGame(): ColiseoGame? = activeGame
+    
+    /**
+     * Verifica si hay una partida en curso.
+     */
+    fun isGameRunning(): Boolean = activeGame?.state == GameState.IN_GAME
+    
+    /**
+     * Inicia una nueva partida con los jugadores dados.
+     */
+    fun startGame(players: List<Player>) {
+        plugin.logger.info("[Coliseo] Iniciando partida con ${players.size} jugadores")
+        
+        // Verificar que haya suficientes jugadores
+        if (players.size < 2) {
+            plugin.logger.warning("[Coliseo] No hay suficientes jugadores (mínimo 2)")
+            return
+        }
+        
+        // Seleccionar arena
+        val arena = arenaManager.getRandomArena()
+        if (arena == null) {
+            plugin.logger.severe("[Coliseo] No hay arenas configuradas")
+            players.forEach { it.sendMessage("${ChatColor.RED}No hay arenas configuradas para el Coliseo") }
+            return
+        }
+        
+        // Crear nueva partida
+        val game = ColiseoGame(arena = arena)
+        activeGame = game
+        
+        // Guardar y desactivar keepInventory para permitir drops
+        val world = arena.eliteSpawns.firstOrNull()?.world ?: arena.hordeSpawns.firstOrNull()?.world
+        if (world != null) {
+            game.originalKeepInventory = world.getGameRuleValue(org.bukkit.GameRule.KEEP_INVENTORY) ?: false
+            world.setGameRule(org.bukkit.GameRule.KEEP_INVENTORY, false)
+            plugin.logger.info("[Coliseo] KeepInventory desactivado (original: ${game.originalKeepInventory})")
+        }
+        
+        // Reiniciar contador de kills
+        coliseoScoreboardService?.resetKills()
+        
+        // Balancear y formar equipos
+        balanceTeams(players, game)
+        
+        // Configurar equipos visuales
+        teamManager.setupTeams(game)
+        
+        // Teletransportar jugadores
+        teleportPlayersToSpawns(game)
+
+        // Forzar modo de juego SURVIVAL a todos los participantes al iniciar
+        players.forEach { player ->
+            try {
+                player.gameMode = GameMode.SURVIVAL
+            } catch (_: Exception) {
+            }
+        }
+
+        // Establecer dificultad del mundo a NORMAL si es posible
+        val gameWorld = game.arena?.eliteSpawns?.firstOrNull()?.world
+            ?: game.arena?.hordeSpawns?.firstOrNull()?.world
+        try {
+            gameWorld?.setDifficulty(Difficulty.NORMAL)
+        } catch (_: Exception) {
+        }
+        
+        // Aplicar kits
+        applyKits(game)
+        
+        // Mostrar scoreboard del Coliseo a todos los jugadores
+        players.forEach { player ->
+            coliseoScoreboardService?.showScoreboard(player)
+        }
+        
+        // Iniciar cuenta regresiva
+        startCountdown(game)
+    }
+    
+    /**
+     * Balancea los equipos según el ranking del torneo.
+     */
+    private fun balanceTeams(players: List<Player>, game: ColiseoGame) {
+        val totalPlayers = players.size
+        
+        // Calcular tamaño del equipo élite
+        val percentage = 0.25 // TODO: Leer de config
+        val minElite = 1
+        val maxElite = 10
+        
+        val calculatedEliteSize = (totalPlayers * percentage).roundToInt()
+        val eliteSize = max(minElite, min(calculatedEliteSize, maxElite))
+        
+        plugin.logger.info("[Coliseo] Tamaño equipo Élite: $eliteSize de $totalPlayers jugadores")
+        
+        // Obtener ranking del torneo
+        val ranking = torneoPlugin.torneoManager.getGlobalRanking()
+        val rankedPlayers = players.sortedByDescending { player ->
+            ranking.find { entry -> entry.uuid == player.uniqueId }?.totalPoints ?: 0
+        }
+        
+        // Asignar mejores jugadores a Élite
+        rankedPlayers.take(eliteSize).forEach { player ->
+            teamManager.addToTeam(player, TeamType.ELITE, game)
+        }
+        
+        // Resto a Horda
+        rankedPlayers.drop(eliteSize).forEach { player ->
+            teamManager.addToTeam(player, TeamType.HORDE, game)
+        }
+        
+        plugin.logger.info("[Coliseo] Equipos formados - Élite: ${game.elitePlayers.size}, Horda: ${game.hordePlayers.size}")
+    }
+    
+    /**
+     * Teletransporta jugadores a sus spawns.
+     */
+    private fun teleportPlayersToSpawns(game: ColiseoGame) {
+        val arena = game.arena ?: return
+        
+        // Teletransportar Élite
+        game.elitePlayers.forEach { playerId ->
+            Bukkit.getPlayer(playerId)?.let { player ->
+                arena.getRandomEliteSpawn()?.let { spawn ->
+                    player.teleport(spawn)
+                }
+            }
+        }
+        
+        // Teletransportar Horda
+        game.hordePlayers.forEach { playerId ->
+            Bukkit.getPlayer(playerId)?.let { player ->
+                arena.getRandomHordeSpawn()?.let { spawn ->
+                    player.teleport(spawn)
+                }
+            }
+        }
+    }
+    
+    /**
+     * Aplica los kits a los jugadores.
+     */
+    private fun applyKits(game: ColiseoGame) {
+        game.elitePlayers.forEach { playerId ->
+            Bukkit.getPlayer(playerId)?.let { kitService.applyEliteKit(it) }
+        }
+        
+        game.hordePlayers.forEach { playerId ->
+            Bukkit.getPlayer(playerId)?.let { kitService.applyHordeKit(it) }
+        }
+    }
+    
+    /**
+     * Inicia la cuenta regresiva antes del juego.
+     */
+    private fun startCountdown(game: ColiseoGame) {
+        game.state = GameState.STARTING
+        
+        var countdown = 5
+        var taskId: Int? = null
+        taskId = Bukkit.getScheduler().runTaskTimer(plugin, Runnable {
+            if (countdown <= 0) {
+                taskId?.let { Bukkit.getScheduler().cancelTask(it) }
+                startGameTimer(game)
+            } else {
+                game.getAllPlayers().forEach { playerId ->
+                    Bukkit.getPlayer(playerId)?.sendTitle(
+                        "${ChatColor.GOLD}$countdown",
+                        "${ChatColor.YELLOW}¡Prepárate!",
+                        0, 20, 10
+                    )
+                }
+                countdown--
+            }
+        }, 0L, 20L).taskId
+    }
+    
+    /**
+     * Inicia el temporizador del juego.
+     */
+    private fun startGameTimer(game: ColiseoGame) {
+        game.state = GameState.IN_GAME
+        
+        // ACTIVAR spawn de mobs temporalmente
+        enableMobSpawning()
+        
+        // Anunciar inicio
+        game.getAllPlayers().forEach { playerId ->
+            Bukkit.getPlayer(playerId)?.sendTitle(
+                "${ChatColor.RED}¡COMIENZA!",
+                "",
+                0, 40, 10
+            )
+        }
+        
+        // Enviar reglas de PvP según el equipo
+        Bukkit.getScheduler().runTaskLater(plugin, Runnable {
+            game.elitePlayers.forEach { playerId ->
+                Bukkit.getPlayer(playerId)?.sendMessage("")
+                Bukkit.getPlayer(playerId)?.sendMessage("${ChatColor.GOLD}${ChatColor.BOLD}═══ ÉLITE ═══")
+                Bukkit.getPlayer(playerId)?.sendMessage("${ChatColor.YELLOW}Eres parte de la élite, pero recuerda:")
+                Bukkit.getPlayer(playerId)?.sendMessage("${ChatColor.RED}${ChatColor.ITALIC}Solo puede quedar uno...")
+                Bukkit.getPlayer(playerId)?.sendMessage("${ChatColor.GRAY}Puedes atacar a cualquiera, incluso a tu propio equipo")
+                Bukkit.getPlayer(playerId)?.sendMessage("")
+            }
+            
+            game.hordePlayers.forEach { playerId ->
+                Bukkit.getPlayer(playerId)?.sendMessage("")
+                Bukkit.getPlayer(playerId)?.sendMessage("${ChatColor.WHITE}${ChatColor.BOLD}═══ HORDA ═══")
+                Bukkit.getPlayer(playerId)?.sendMessage("${ChatColor.GRAY}Eres parte de la horda:")
+                Bukkit.getPlayer(playerId)?.sendMessage("${ChatColor.GREEN}¡Trabajan en equipo! No pueden atacarse entre ustedes")
+                Bukkit.getPlayer(playerId)?.sendMessage("${ChatColor.YELLOW}Unan fuerzas para derrotar a la élite")
+                Bukkit.getPlayer(playerId)?.sendMessage("")
+            }
+        }, 60L) // 3 segundos después del inicio
+        
+        // Crear temporizador
+        val timer = GameTimer(
+            plugin = torneoPlugin,
+            durationInSeconds = gameDurationMinutes * 60,
+            title = "§c§lCOLISEO",
+            onFinish = {
+                eliteWins(game)
+            },
+            onTick = { secondsLeft ->
+                checkVictoryConditions(game)
+            }
+        )
+        
+        // Añadir jugadores al temporizador
+        game.getAllPlayers().forEach { playerId ->
+            Bukkit.getPlayer(playerId)?.let { timer.addPlayer(it) }
+        }
+        
+        game.gameTimer = timer
+        timer.start()
+    }
+    
+    /**
+     * Verifica las condiciones de victoria.
+     */
+    private fun checkVictoryConditions(game: ColiseoGame) {
+        if (game.state != GameState.IN_GAME) return
+        
+        // Si la Élite es eliminada, gana la Horda
+        if (game.elitePlayers.isEmpty()) {
+            hordeWins(game)
+            return
+        }
+        
+        // Si la Horda es eliminada, gana la Élite
+        if (game.hordePlayers.isEmpty()) {
+            eliteWins(game)
+            return
+        }
+    }
+    
+    /**
+     * Victoria de la Élite.
+     */
+    private fun eliteWins(game: ColiseoGame) {
+        if (game.state == GameState.FINISHED) return
+        game.state = GameState.FINISHED
+        
+        plugin.logger.info("[Coliseo] ¡LA ÉLITE HA GANADO!")
+        
+        // Anunciar victoria
+        broadcastToGame(game, Component.text("═══════════════════════════════", NamedTextColor.GOLD))
+        broadcastToGame(game, Component.text("¡LA ÉLITE HA GANADO!", NamedTextColor.GOLD))
+        broadcastToGame(game, Component.text("═══════════════════════════════", NamedTextColor.GOLD))
+        
+        // Otorgar puntos según sistema V4.1
+        scoreService.finalizeScores(game, TeamType.ELITE)
+        
+        // Finalizar juego
+        endGame(game)
+    }
+    
+    /**
+     * Victoria de la Horda.
+     */
+    private fun hordeWins(game: ColiseoGame) {
+        if (game.state == GameState.FINISHED) return
+        game.state = GameState.FINISHED
+        
+        plugin.logger.info("[Coliseo] ¡LA HORDA HA GANADO!")
+        
+        // Anunciar victoria
+        broadcastToGame(game, Component.text("═══════════════════════════════", NamedTextColor.WHITE))
+        broadcastToGame(game, Component.text("¡LA HORDA HA GANADO!", NamedTextColor.WHITE))
+        broadcastToGame(game, Component.text("═══════════════════════════════", NamedTextColor.WHITE))
+        
+        // Otorgar puntos según sistema V4.1
+        scoreService.finalizeScores(game, TeamType.HORDE)
+        
+        // Finalizar juego
+        endGame(game)
+    }
+    
+    /**
+     * Finaliza la partida.
+     */
+    fun endGame(game: ColiseoGame? = null) {
+        val currentGame = game ?: activeGame ?: return
+        currentGame.state = GameState.FINISHED
+        
+        // Detener temporizador
+        currentGame.gameTimer?.stop()
+        
+        // DESACTIVAR spawn de mobs
+        disableMobSpawning()
+        
+        // Limpiar mobs aliados spawneados
+        cleanupHordeMobs(currentGame)
+        
+        plugin.logger.info("[Coliseo] Iniciando limpieza de la arena...")
+        
+        // Limpiar ítems dropeados
+        plugin.logger.info("[Coliseo] Limpiando ${currentGame.droppedItems.size} ítems dropeados...")
+        currentGame.droppedItems.forEach { item ->
+            if (item.isValid) {
+                item.remove()
+            }
+        }
+        currentGame.droppedItems.clear()
+        
+        // Limpiar bloques colocados
+        plugin.logger.info("[Coliseo] Limpiando ${currentGame.placedBlocks.size} bloques colocados...")
+        currentGame.placedBlocks.forEach { block ->
+            block.type = Material.AIR
+        }
+        currentGame.placedBlocks.clear()
+        
+        plugin.logger.info("[Coliseo] Limpieza completada")
+        
+        // Restaurar gamerule keepInventory
+        val world = currentGame.arena?.eliteSpawns?.firstOrNull()?.world 
+            ?: currentGame.arena?.hordeSpawns?.firstOrNull()?.world
+        if (world != null) {
+            world.setGameRule(org.bukkit.GameRule.KEEP_INVENTORY, currentGame.originalKeepInventory)
+            plugin.logger.info("[Coliseo] KeepInventory restaurado a: ${currentGame.originalKeepInventory}")
+        }
+        
+        // IMPORTANTE: Limpiar equipos y efectos visuales ANTES de restaurar estado
+        plugin.logger.info("[Coliseo] Limpiando equipos y efectos visuales...")
+        teamManager.cleanupTeams(currentGame)
+        
+        // Restaurar estado de todos los jugadores (incluidos espectadores)
+        plugin.logger.info("[Coliseo] Restaurando estado de ${currentGame.getAllPlayers().size} jugadores...")
+        currentGame.getAllPlayers().forEach { playerId ->
+            Bukkit.getPlayer(playerId)?.let { player ->
+                // Restaurar salud
+                player.health = player.getAttribute(org.bukkit.attribute.Attribute.GENERIC_MAX_HEALTH)?.value ?: 20.0
+                
+                // Restaurar hambre
+                player.foodLevel = 20
+                player.saturation = 5.0f
+                
+                // Limpiar inventario
+                player.inventory.clear()
+                
+                // Limpiar efectos de poción
+                player.activePotionEffects.forEach { effect ->
+                    player.removePotionEffect(effect.type)
+                }
+                
+                // Restaurar modo de juego
+                player.gameMode = GameMode.ADVENTURE
+                
+                // Ocultar scoreboard del Coliseo y restaurar el global
+                coliseoScoreboardService?.hideScoreboard(player)
+            }
+        }
+        
+        // Teletransportar jugadores al lobby
+        Bukkit.getScheduler().runTaskLater(plugin, Runnable {
+            currentGame.getAllPlayers().forEach { playerId ->
+                Bukkit.getPlayer(playerId)?.let { player ->
+                    los5fantasticos.torneo.services.TournamentFlowManager.returnToLobby(player)
+                }
+            }
+            
+            // Limpiar partida
+            activeGame = null
+            
+            plugin.logger.info("[Coliseo] Partida finalizada y limpiada correctamente")
+        }, 100L)
+
+        // Establecer dificultad del mundo a Pacífico si es posible
+        val gameWorld = currentGame.arena?.eliteSpawns?.firstOrNull()?.world
+            ?: currentGame.arena?.hordeSpawns?.firstOrNull()?.world
+        try {
+            gameWorld?.setDifficulty(Difficulty.PEACEFUL)
+        } catch (_: Exception) {
+        }
+    }
+    
+    /**
+     * Envía un mensaje a todos los jugadores del juego.
+     */
+    private fun broadcastToGame(game: ColiseoGame, message: Component) {
+        game.getAllPlayers().forEach { playerId ->
+            Bukkit.getPlayer(playerId)?.sendMessage(message)
+        }
+    }
+    
+    // ===== CONTROL DE SPAWN DE MOBS =====
+    
+    /**
+     * Activa el spawn de mobs temporalmente para el juego.
+     * Modifica el gamerule doMobSpawning.
+     */
+    private fun enableMobSpawning() {
+        val world = activeGame?.arena?.eliteSpawns?.firstOrNull()?.world ?: return
+        
+        val currentValue = world.getGameRuleValue(org.bukkit.GameRule.DO_MOB_SPAWNING) ?: false
+        plugin.logger.info("[Coliseo] Activando spawn de mobs (valor anterior: $currentValue)")
+        
+        world.setGameRule(org.bukkit.GameRule.DO_MOB_SPAWNING, true)
+    }
+    
+    /**
+     * Desactiva el spawn de mobs al finalizar el juego.
+     * Restaura el gamerule doMobSpawning.
+     */
+    private fun disableMobSpawning() {
+        val world = activeGame?.arena?.eliteSpawns?.firstOrNull()?.world ?: return
+        
+        plugin.logger.info("[Coliseo] Desactivando spawn de mobs")
+        world.setGameRule(org.bukkit.GameRule.DO_MOB_SPAWNING, false)
+    }
+    
+    /**
+     * Limpia todos los mobs aliados spawneados por la Horda.
+     */
+    private fun cleanupHordeMobs(game: ColiseoGame) {
+        plugin.logger.info("[Coliseo] Limpiando ${game.hordeMobs.size} mobs aliados...")
+        
+        game.hordeMobs.forEach { mobUUID ->
+            val world = game.arena?.eliteSpawns?.firstOrNull()?.world ?: return@forEach
+            world.entities.find { it.uniqueId == mobUUID }?.remove()
+        }
+        
+        game.hordeMobs.clear()
+        plugin.logger.info("[Coliseo] Mobs aliados limpiados")
+    }
+}

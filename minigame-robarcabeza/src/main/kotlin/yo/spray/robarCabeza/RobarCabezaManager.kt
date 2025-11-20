@@ -1,0 +1,360 @@
+package yo.spray.robarCabeza
+
+import los5fantasticos.torneo.TorneoPlugin
+import los5fantasticos.torneo.api.MinigameModule
+import org.bukkit.Bukkit
+import org.bukkit.Location
+import org.bukkit.configuration.file.FileConfiguration
+import org.bukkit.configuration.file.YamlConfiguration
+import org.bukkit.entity.Player
+import org.bukkit.plugin.Plugin
+import yo.spray.robarCabeza.game.Arena
+import yo.spray.robarCabeza.listeners.GameListener
+import yo.spray.robarCabeza.services.ArenaManager
+import yo.spray.robarCabeza.services.GameManager
+import yo.spray.robarCabeza.services.ItemKitService
+import yo.spray.robarCabeza.services.RobarCabezaScoreboardService
+import yo.spray.robarCabeza.services.ScoreService
+import yo.spray.robarCabeza.services.VisualService
+import java.io.File
+
+/**
+ * Módulo principal de Robar Cabeza.
+ * 
+ * Actúa como punto de entrada del minijuego y orquestador de servicios.
+ * Toda la lógica de juego ha sido delegada a servicios especializados.
+ * 
+ * Arquitectura refactorizada:
+ * - GameManager: Lógica central del juego
+ * - ScoreService: Gestión de puntuación
+ * - VisualService: Gestión de cascos
+ * - ArenaManager: Gestión de arenas
+ * - GameListener: Manejo de eventos
+ * - RobarCabezaGame: Modelo de estado de partida
+ */
+@Suppress("unused")
+class RobarCabezaManager(val torneoPlugin: TorneoPlugin) : MinigameModule {
+
+    override val gameName = "RobarCabeza"
+    override val version = "5.0"
+    override val description = "Minijuego de robar la cabeza del creador"
+
+    private lateinit var plugin: Plugin
+    
+    /**
+     * Configuración del minijuego.
+     */
+    private lateinit var config: FileConfiguration
+    
+    /**
+     * Servicio de visualización de cabezas (simplificado).
+     */
+    private lateinit var visualService: VisualService
+    
+    /**
+     * Servicio de puntuación.
+     */
+    private lateinit var scoreService: ScoreService
+    
+    /**
+     * Gestor de arenas.
+     */
+    lateinit var arenaManager: ArenaManager
+        private set
+    
+    /**
+     * Gestor central del juego.
+     */
+    lateinit var gameManager: GameManager
+        private set
+    
+    /**
+     * Listener de eventos del juego.
+     */
+    private lateinit var gameListener: GameListener
+    
+    /**
+     * Servicio de kit de pociones con cooldowns.
+     */
+    private lateinit var itemKitService: ItemKitService
+    
+    /**
+     * Servicio de scoreboard dedicado para el minijuego.
+     */
+    lateinit var robarCabezaScoreboardService: RobarCabezaScoreboardService
+        private set
+
+    // ===== Ciclo de vida del módulo =====
+
+    override fun onEnable(plugin: Plugin) {
+        this.plugin = plugin
+        
+        // Cargar configuración del minijuego
+        loadConfig()
+        
+        // Inicializar servicios
+        visualService = VisualService()
+        configureVisualService()
+        
+        scoreService = ScoreService(this)
+        
+        arenaManager = ArenaManager()
+        arenaManager.initialize(plugin.dataFolder)
+        
+        itemKitService = ItemKitService(plugin)
+        itemKitService.loadKitFromConfig(config)
+        
+        robarCabezaScoreboardService = RobarCabezaScoreboardService(plugin, torneoPlugin.scoreboardService, scoreService)
+        
+        gameManager = GameManager(plugin, torneoPlugin, scoreService, visualService, arenaManager, itemKitService, this)
+        gameListener = GameListener(gameManager)
+        
+        // Cargar configuración de spawns (legacy)
+        loadSpawnFromConfig()
+        
+        // Registrar listener
+        plugin.server.pluginManager.registerEvents(gameListener, plugin)
+        
+        plugin.logger.info("✓ $gameName v$version habilitado")
+        plugin.logger.info("  - Configuración cargada")
+        plugin.logger.info("  - VisualService inicializado")
+        plugin.logger.info("  - ScoreService inicializado")
+        plugin.logger.info("  - ArenaManager inicializado (${arenaManager.getArenaCount()} arenas)")
+        plugin.logger.info("  - ItemKitService inicializado")
+        plugin.logger.info("  - RobarCabezaScoreboardService inicializado")
+        plugin.logger.info("  - GameManager inicializado")
+        plugin.logger.info("  - GameListener registrado")
+    }
+
+    /**
+     * Proporciona los ejecutores de comandos para registro centralizado.
+     * Llamado por TorneoPlugin durante el registro del módulo.
+     */
+    override fun getCommandExecutors(): Map<String, org.bukkit.command.CommandExecutor> {
+        return mapOf(
+            "robarcabeza" to yo.spray.robarCabeza.commands.RobarCabezaCommands(this, arenaManager, torneoPlugin)
+        )
+    }
+
+    override fun onDisable() {
+        // Limpiar recursos del ItemKitService
+        if (::itemKitService.isInitialized) {
+            itemKitService.clearAll()
+        }
+        
+        // Limpiar recursos del GameManager
+        if (::gameManager.isInitialized) {
+            gameManager.clearAll()
+        }
+        
+        // Limpiar recursos del ScoreboardService
+        if (::robarCabezaScoreboardService.isInitialized) {
+            robarCabezaScoreboardService.clearAll()
+        }
+        
+        // Guardar arenas
+        if (::arenaManager.isInitialized) {
+            arenaManager.saveArenas()
+        }
+        
+        plugin.logger.info("✓ $gameName deshabilitado")
+    }
+
+    override fun getActivePlayers(): List<Player> {
+        return if (::gameManager.isInitialized) {
+            gameManager.getActivePlayers()
+        } else {
+            emptyList()
+        }
+    }
+
+    override fun isGameRunning(): Boolean {
+        return if (::gameManager.isInitialized) {
+            gameManager.isGameRunning()
+        } else {
+            false
+        }
+    }
+    
+    /**
+     * Inicia el minijuego en modo torneo centralizado.
+     * Todos los jugadores son añadidos al juego automáticamente.
+     */
+    override fun onTournamentStart(players: List<Player>) {
+        plugin.logger.info("[$gameName] ═══ INICIO DE TORNEO ═══")
+        plugin.logger.info("[$gameName] Iniciando juego con ${players.size} jugadores")
+        
+        // Verificar que haya al menos una arena configurada
+        if (arenaManager.getArenaCount() == 0) {
+            plugin.logger.severe("[$gameName] No hay arenas configuradas. Usa /robarcabeza admin create <nombre>")
+            players.forEach { it.sendMessage("§c¡No hay arenas configuradas para RobarCabeza!") }
+            return
+        }
+        
+        // Crear una nueva partida y añadir todos los jugadores
+        val game = gameManager.getActiveGame() ?: run {
+            // Forzar creación de nueva partida añadiendo el primer jugador
+            gameManager.addPlayer(players.first())
+            gameManager.getActiveGame()!!
+        }
+        
+        // Añadir el resto de jugadores sin iniciar el juego todavía
+        players.drop(1).forEach { player ->
+            game.players.add(player.uniqueId)
+        }
+        
+        plugin.logger.info("[$gameName] ${players.size} jugadores añadidos a la partida")
+        
+        // Iniciar el juego inmediatamente con una arena aleatoria
+        gameManager.startGame()
+        
+        plugin.logger.info("[$gameName] ✓ Juego iniciado en modo torneo")
+    }
+    
+    /**
+     * Finaliza todas las partidas activas sin deshabilitar el módulo.
+     */
+    override fun endAllGames() {
+        plugin.logger.info("[$gameName] Finalizando todas las partidas activas...")
+        
+        if (::gameManager.isInitialized && gameManager.isGameRunning()) {
+            gameManager.endGame()
+            plugin.logger.info("[$gameName] ✓ Partida finalizada correctamente")
+        }
+    }
+
+    // ===== Métodos públicos para comandos =====
+
+    /**
+     * Añade un jugador al juego (comando /robarcabeza join).
+     */
+    fun joinGame(player: Player) {
+        gameManager.addPlayer(player)
+    }
+
+    /**
+     * Remueve un jugador del juego (comando /robarcabeza leave).
+     */
+    fun removePlayerFromGame(player: Player) {
+        gameManager.removePlayer(player)
+    }
+
+    /**
+     * Da la cabeza a un jugador específico (comando de admin).
+     */
+    fun giveTailToPlayer(player: Player) {
+        val game = gameManager.getActiveGame()
+        if (game != null && game.players.contains(player.uniqueId)) {
+            gameManager.giveHead(player)
+        } else {
+            player.sendMessage("§c¡No estás en el juego!")
+        }
+    }
+
+    /**
+     * Establece el spawn del juego.
+     */
+    fun setGameSpawn(location: Location) {
+        gameManager.gameSpawn = location
+        torneoPlugin.config.set("robarcabeza.gameSpawn.x", location.x)
+        torneoPlugin.config.set("robarcabeza.gameSpawn.y", location.y)
+        torneoPlugin.config.set("robarcabeza.gameSpawn.z", location.z)
+        torneoPlugin.saveConfig()
+    }
+
+    /**
+     * Establece el spawn del lobby.
+     */
+    fun setLobbySpawn(location: Location) {
+        gameManager.lobbySpawn = location
+        torneoPlugin.config.set("robarcabeza.lobbySpawn.x", location.x)
+        torneoPlugin.config.set("robarcabeza.lobbySpawn.y", location.y)
+        torneoPlugin.config.set("robarcabeza.lobbySpawn.z", location.z)
+        torneoPlugin.saveConfig()
+    }
+
+    /**
+     * Inicia el juego manualmente (comando de admin).
+     */
+    fun startGameExternal(arena: Arena? = null) {
+        if (!gameManager.isGameRunning()) {
+            val game = gameManager.getActiveGame()
+            if (game != null && game.players.size >= 2) {
+                gameManager.startGame(arena)
+            }
+        }
+    }
+
+    /**
+     * Finaliza el juego manualmente (comando de admin).
+     */
+    fun endGameExternal() {
+        if (gameManager.isGameRunning()) {
+            gameManager.endGame()
+        }
+    }
+    
+    /**
+     * Carga la configuración de spawns desde el archivo de configuración.
+     */
+    private fun loadSpawnFromConfig() {
+        val cfg = torneoPlugin.config
+        val world = Bukkit.getWorlds().first()
+
+        gameManager.gameSpawn = if (cfg.contains("robarcabeza.gameSpawn.x")) {
+            Location(
+                world,
+                cfg.getDouble("robarcabeza.gameSpawn.x"),
+                cfg.getDouble("robarcabeza.gameSpawn.y"),
+                cfg.getDouble("robarcabeza.gameSpawn.z")
+            )
+        } else {
+            world.spawnLocation
+        }
+
+        gameManager.lobbySpawn = if (cfg.contains("robarcabeza.lobbySpawn.x")) {
+            Location(
+                world,
+                cfg.getDouble("robarcabeza.lobbySpawn.x"),
+                cfg.getDouble("robarcabeza.lobbySpawn.y"),
+                cfg.getDouble("robarcabeza.lobbySpawn.z")
+            )
+        } else {
+            world.spawnLocation
+        }
+    }
+    
+    /**
+     * Carga el archivo de configuración robarcabeza.yml.
+     */
+    private fun loadConfig() {
+        val configFile = File(plugin.dataFolder, "robarcabeza.yml")
+        
+        // Si no existe, copiar desde resources
+        if (!configFile.exists()) {
+            plugin.dataFolder.mkdirs()
+            plugin.saveResource("robarcabeza.yml", false)
+        }
+        
+        config = YamlConfiguration.loadConfiguration(configFile)
+        plugin.logger.info("[$gameName] Configuración cargada desde robarcabeza.yml")
+    }
+    
+    /**
+     * Configura el VisualService con los valores del archivo de configuración.
+     */
+    private fun configureVisualService() {
+        val creatorHeads = config.getStringList("visuals.creator-heads").ifEmpty {
+            listOf("Notch")
+        }
+        
+        visualService.configure(creatorHeads)
+        
+        plugin.logger.info("[$gameName] Visual configurado: heads=${creatorHeads.size}")
+    }
+    
+    /**
+     * Obtiene la configuración del minijuego.
+     */
+    fun getConfig(): FileConfiguration = config
+}
