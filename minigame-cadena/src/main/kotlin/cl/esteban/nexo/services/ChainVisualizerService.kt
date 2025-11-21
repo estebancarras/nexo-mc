@@ -1,112 +1,101 @@
 package cl.esteban.nexo.services
 
 import cl.esteban.nexo.NexoPlugin
-import cl.esteban.nexo.game.Team
 import cl.esteban.nexo.visuals.VisualChain
+import org.bukkit.Bukkit
 import org.bukkit.entity.Player
+import org.bukkit.scheduler.BukkitRunnable
 import java.util.UUID
 
 /**
- * Servicio centralizado para gestionar el ciclo de vida de las cadenas visuales.
- * 
- * Este servicio actúa como orquestador, asegurando que:
- * - Se creen cadenas lineales (A-B-C-D) en lugar de mallas completas
- * - Las cadenas se limpien correctamente cuando un jugador se desconecta
- * - Todos los recursos visuales se liberen al finalizar una partida
- * 
- * @property plugin Instancia del plugin
+ * Servicio para visualizar las cadenas.
  */
 class ChainVisualizerService(private val plugin: NexoPlugin) {
     
-    /**
-     * Lista de cadenas visuales activas.
-     * Almacenadas en una lista simple ya que cada cadena es única entre dos jugadores.
-     */
-    private val activeChains = mutableListOf<VisualChain>()
+    // Mapa de cadenas visuales: "UUID1-UUID2" -> VisualChain
+    private val activeChains = mutableMapOf<String, VisualChain>()
     
-    /**
-     * Crea cadenas visuales lineales para un equipo.
-     * 
-     * Los jugadores se conectan en orden lineal: A <-> B <-> C <-> D
-     * En lugar de una malla completa donde todos están conectados con todos.
-     * 
-     * @param team Equipo para el cual crear las cadenas
-     */
-    fun createChainsForTeam(team: Team) {
-        val players = team.getOnlinePlayers()
-        
-        // Se necesitan al menos 2 jugadores para crear una cadena
-        if (players.size < 2) {
-            // Caso normal: equipos con 1 jugador no necesitan cadenas
-            return
-        }
-        
-        var chainsCreated = 0
-        
-        // LÓGICA LINEAL: Conectar jugador[i] con jugador[i+1]
-        for (i in 0 until players.size - 1) {
-            val playerA = players[i]
-            val playerB = players[i + 1]
-            
-            // Crear la cadena visual
-            val chain = VisualChain(plugin, playerA, playerB)
-            chain.create()
-            activeChains.add(chain)
-            chainsCreated++
-            
-            plugin.logger.info("[ChainVisualizerService] Cadena creada: ${playerA.name} <-> ${playerB.name}")
-        }
-        
-        plugin.logger.info("[ChainVisualizerService] ${chainsCreated} cadenas lineales creadas. Total de cadenas activas: ${activeChains.size}")
+    init {
+        startUpdateTask()
+    }
+    
+    private fun startUpdateTask() {
+        // Tarea periódica para asegurar que las cadenas visuales coincidan con los vínculos lógicos
+        object : BukkitRunnable() {
+            override fun run() {
+                updateChains()
+            }
+        }.runTaskTimer(plugin, 40L, 40L) // Cada 2 segundos sincronización completa
     }
     
     /**
-     * Destruye todas las cadenas visuales asociadas a un jugador.
-     * 
-     * Se llama cuando un jugador se desconecta o es eliminado de la partida.
-     * 
-     * @param player Jugador cuyas cadenas deben destruirse
+     * Sincroniza las cadenas visuales con el LinkManager.
+     */
+    fun updateChains() {
+        val links = plugin.linkManager.getAllLinks()
+        val activePairs = mutableSetOf<String>()
+        
+        // 1. Crear cadenas nuevas
+        for ((uuid1, targets) in links) {
+            val player1 = Bukkit.getPlayer(uuid1) ?: continue
+            
+            for (uuid2 in targets) {
+                val player2 = Bukkit.getPlayer(uuid2) ?: continue
+                
+                val pairId = getPairId(uuid1, uuid2)
+                activePairs.add(pairId)
+                
+                if (!activeChains.containsKey(pairId)) {
+                    createChain(player1, player2, pairId)
+                }
+            }
+        }
+        
+        // 2. Eliminar cadenas obsoletas
+        val toRemove = mutableListOf<String>()
+        for (pairId in activeChains.keys) {
+            if (!activePairs.contains(pairId)) {
+                toRemove.add(pairId)
+            }
+        }
+        
+        for (pairId in toRemove) {
+            activeChains[pairId]?.destroy()
+            activeChains.remove(pairId)
+        }
+    }
+    
+    private fun createChain(player1: Player, player2: Player, pairId: String) {
+        val chain = VisualChain(plugin, player1, player2)
+        chain.create()
+        activeChains[pairId] = chain
+    }
+    
+    private fun getPairId(uuid1: UUID, uuid2: UUID): String {
+        return if (uuid1.toString() < uuid2.toString()) "$uuid1-$uuid2" else "$uuid2-$uuid1"
+    }
+    
+    /**
+     * Destruye las cadenas visuales de un jugador.
      */
     fun destroyChainsForPlayer(player: Player) {
-        // Filtrar cadenas que involucran a este jugador
-        val chainsToRemove = activeChains.filter { chain ->
-            // Necesitamos acceder a los jugadores de la cadena
-            // Como VisualChain no expone los jugadores, destruimos todas las cadenas
-            // y las recreamos sin este jugador (esto se maneja en el GameManager)
-            true // Por ahora destruimos todas, el equipo las recreará sin este jugador
+        val uuid = player.uniqueId.toString()
+        val toRemove = mutableListOf<String>()
+        
+        for (pairId in activeChains.keys) {
+            if (pairId.contains(uuid)) {
+                toRemove.add(pairId)
+            }
         }
         
-        // Destruir las cadenas
-        chainsToRemove.forEach { chain ->
-            chain.destroy()
+        for (pairId in toRemove) {
+            activeChains[pairId]?.destroy()
+            activeChains.remove(pairId)
         }
-        
-        // Remover de la lista
-        activeChains.removeAll(chainsToRemove)
     }
     
-    /**
-     * Limpia todas las cadenas visuales activas.
-     * 
-     * Se llama al finalizar una partida o al desactivar el módulo.
-     */
     fun clearAllChains() {
-        // Destruir todas las cadenas
-        activeChains.forEach { chain ->
-            chain.destroy()
-        }
-        
-        // Limpiar la lista
+        activeChains.values.forEach { it.destroy() }
         activeChains.clear()
-    }
-    
-    /**
-     * Obtiene el número de cadenas visuales activas.
-     * Útil para debugging y monitoreo.
-     * 
-     * @return Cantidad de cadenas activas
-     */
-    fun getActiveChainCount(): Int {
-        return activeChains.size
     }
 }
