@@ -3,7 +3,7 @@ package cl.esteban.nexo
 import cl.esteban.nexo.commands.NexoCommand
 import cl.esteban.nexo.listeners.PlayerQuitListener
 import cl.esteban.nexo.services.ChainService
-import cl.esteban.nexo.services.ChainVisualizerService
+import cl.esteban.nexo.services.CompassService
 import cl.esteban.nexo.managers.LinkManager
 import org.bukkit.plugin.java.JavaPlugin
 
@@ -22,7 +22,7 @@ class NexoPlugin : JavaPlugin() {
     lateinit var chainService: ChainService
         private set
 
-    lateinit var chainVisualizerService: ChainVisualizerService
+    lateinit var compassService: CompassService
         private set
 
     override fun onEnable() {
@@ -34,16 +34,18 @@ class NexoPlugin : JavaPlugin() {
         linkManager = LinkManager(this)
         linkManager.loadLinks()
 
-        // Inicializar ChainVisualizerService
-        chainVisualizerService = ChainVisualizerService(this)
-
         // Inicializar ChainService
         chainService = ChainService(this)
+
+        // Inicializar CompassService
+        compassService = CompassService(this)
+        compassService.start()
 
         // Registrar listeners
         server.pluginManager.registerEvents(PlayerQuitListener(this), this)
         server.pluginManager.registerEvents(cl.esteban.nexo.listeners.SharedDamageListener(this), this)
         server.pluginManager.registerEvents(cl.esteban.nexo.listeners.SharedDeathListener(this), this)
+        server.pluginManager.registerEvents(cl.esteban.nexo.listeners.SharedEffectListener(this), this)
 
         // Registrar comandos
         getCommand("nexo")?.setExecutor(NexoCommand(this))
@@ -61,8 +63,8 @@ class NexoPlugin : JavaPlugin() {
         if (::chainService.isInitialized) {
             chainService.clearAll()
         }
-        if (::chainVisualizerService.isInitialized) {
-            chainVisualizerService.clearAllChains()
+        if (::compassService.isInitialized) {
+            compassService.stop()
         }
 
         logger.info("✓ Nexo deshabilitado")

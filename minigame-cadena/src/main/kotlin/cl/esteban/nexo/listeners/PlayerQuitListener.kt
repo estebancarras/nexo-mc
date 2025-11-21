@@ -12,8 +12,7 @@ class PlayerQuitListener(private val plugin: NexoPlugin) : Listener {
     
     @EventHandler
     fun onPlayerQuit(event: PlayerQuitEvent) {
-        // Limpiar cadenas visuales del jugador que sale
         // Los vínculos lógicos se mantienen (persistencia)
-        plugin.chainVisualizerService.destroyChainsForPlayer(event.player)
+        // Ya no hay cadenas visuales que limpiar (Soul Link es invisible)
     }
 }

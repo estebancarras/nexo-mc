@@ -1,14 +1,30 @@
-# Configuración del minijuego Cadena (Nexo)
-fisica-cadena:
-  distancia-maxima: 5.0
-  fuerza-atraccion: 0.3
-  reduccion-fuerza-aire: 0.5
-  intervalo-ticks: 3
+# Configuración de Soul Link Ultimate (Nexo)
+# Sistema de Conexión Espiritual Total
 
+# Configuración del vínculo espiritual
+settings:
+  # Físicas de arrastre desactivadas (conexión invisible)
+  physics: false
+  
+  # Distancia máxima: -1 = infinita (funciona entre mundos)
+  max-distance: -1
+  
+  # Compartir efectos de poción entre vinculados
+  share-effects: true
+  
+  # Brújula apunta automáticamente al jugador vinculado
+  compass-tracking: true
+  
+  # Porcentaje de daño compartido (0.0 - 1.0)
+  # 0.5 = 50% del daño se comparte con el vinculado
+  shared-damage-percentage: 0.5
+
+# Configuración de partida
 partida:
   # Duración de la partida en segundos (300 = 5 minutos)
   duracion-segundos: 300
 
+# Sistema de puntuación
 puntuacion:
   # Puntuación basada en puntajesjuegosv2.xlsx
   # BALANCEADO PARA 10 CHECKPOINTS (PME Total ~210)
@@ -33,12 +49,4 @@ puntuacion:
     bono-3er-lugar: 10
     # Bono para cualquier otro equipo que complete el parkour
     bono-completar: 5
-# Configuración de visuales
-visuales:
-  cadena:
-    # Material del ítem para la cadena
-    # Lista de materiales: https://hub.spigotmc.org/javadocs/spigot/org/bukkit/Material.html
-    material: CHAIN
-    # Frecuencia de actualización en ticks (20 ticks = 1 segundo)
-    # 2 ticks = 10 actualizaciones/segundo para fluidez
-    tick-rate: 2
+
