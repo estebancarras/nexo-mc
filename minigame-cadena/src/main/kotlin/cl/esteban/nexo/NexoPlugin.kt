@@ -42,6 +42,8 @@ class NexoPlugin : JavaPlugin() {
 
         // Registrar listeners
         server.pluginManager.registerEvents(PlayerQuitListener(this), this)
+        server.pluginManager.registerEvents(cl.esteban.nexo.listeners.SharedDamageListener(this), this)
+        server.pluginManager.registerEvents(cl.esteban.nexo.listeners.SharedDeathListener(this), this)
 
         // Registrar comandos
         getCommand("nexo")?.setExecutor(NexoCommand(this))
