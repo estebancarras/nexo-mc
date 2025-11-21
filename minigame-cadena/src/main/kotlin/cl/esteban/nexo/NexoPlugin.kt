@@ -5,6 +5,7 @@ import cl.esteban.nexo.listeners.PlayerQuitListener
 import cl.esteban.nexo.services.ChainService
 import cl.esteban.nexo.services.CompassService
 import cl.esteban.nexo.managers.LinkManager
+import cl.esteban.nexo.managers.ReviveManager
 import org.bukkit.plugin.java.JavaPlugin
 
 /**
@@ -25,6 +26,9 @@ class NexoPlugin : JavaPlugin() {
     lateinit var compassService: CompassService
         private set
 
+    lateinit var reviveManager: ReviveManager
+        private set
+
     override fun onEnable() {
         // Cargar configuración
         saveDefaultConfig()
@@ -41,11 +45,15 @@ class NexoPlugin : JavaPlugin() {
         compassService = CompassService(this)
         compassService.start()
 
+        // Inicializar ReviveManager
+        reviveManager = ReviveManager(this)
+
         // Registrar listeners
         server.pluginManager.registerEvents(PlayerQuitListener(this), this)
         server.pluginManager.registerEvents(cl.esteban.nexo.listeners.SharedDamageListener(this), this)
         server.pluginManager.registerEvents(cl.esteban.nexo.listeners.SharedDeathListener(this), this)
         server.pluginManager.registerEvents(cl.esteban.nexo.listeners.SharedEffectListener(this), this)
+        server.pluginManager.registerEvents(cl.esteban.nexo.listeners.DownedListener(this), this)
 
         // Registrar comandos
         getCommand("nexo")?.setExecutor(NexoCommand(this))
@@ -65,6 +73,9 @@ class NexoPlugin : JavaPlugin() {
         }
         if (::compassService.isInitialized) {
             compassService.stop()
+        }
+        if (::reviveManager.isInitialized) {
+            reviveManager.clearAll()
         }
 
         logger.info("✓ Nexo deshabilitado")
